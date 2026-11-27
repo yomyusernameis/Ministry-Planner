@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ministry Planner</title>
 <link id="favicon" rel="icon" href="">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1b2a4a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ministry Planner">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root{--navy:#1b2a4a;--gold:#f2b705;--blue:#2f80ed;--green:#16a34a;--green-dark:#166534;--green-soft:#eaf5ee;--ink:#111827;--muted:#6b7280;--line:#e5e7eb;--bg:#f7f8fa}
   *{box-sizing:border-box}
@@ -213,7 +220,10 @@ const P = {
   cart:'<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>',
   pin:'<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
   x:'<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
-  check:'<polyline points="20 6 9 17 4 12"/>'
+  check:'<polyline points="20 6 9 17 4 12"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.9" y1="4.9" x2="6.3" y2="6.3"/><line x1="17.7" y1="17.7" x2="19.1" y2="19.1"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.9" y1="19.1" x2="6.3" y2="17.7"/><line x1="17.7" y1="6.3" x2="19.1" y2="4.9"/>',
+  cloud:'<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>',
+  rain:'<path d="M19 16.9A5 5 0 0 0 18 7h-1.26a8 8 0 1 0-11.62 9"/><line x1="8" y1="19" x2="8" y2="21"/><line x1="12" y1="19" x2="12" y2="21"/><line x1="16" y1="19" x2="16" y2="21"/>'
 };
 function ic(k, s){ s = s || 24; return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${P[k]}</svg>`; }
 function PIN(s){ s = s || 14; return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>`; }
@@ -366,6 +376,125 @@ function mySignups(){
   });
   out.sort((x,y)=> x.k < y.k ? -1 : 1);
   return out;
+}
+// ---- Field Days tab + Who's out today + Weather + Install (Nov 26, 2026) ----
+function whoOutTodayHTML(){
+  const k = dayKey(new Date());
+  const {list} = signupsFor(k);
+  const n = list.length;
+  return `<div class="card">
+    <div class="secthead">Who's out today</div>
+    ${n===0 ? `<p class="sub" style="margin:0">Nobody's signed up for today yet — be the first.</p>` : `
+    <p style="margin:0 0 8px"><b>${n} friend${n===1?"":"s"} going out today</b></p>
+    <div>${list.map(it=>`
+      <div class="person" onclick="openContact('${it.code}')">
+        ${avatar(it.code, 40)}
+        <div class="pinfo"><div class="pname">${personName(it.code)}</div><div class="psub">${it.activities.join(" · ")}</div></div>
+        <span class="chev">${ic("chevr",18)}</span>
+      </div>`).join("")}
+    </div>`}
+  </div>`;
+}
+function fieldDaysHTML(){
+  const mine = mySignups();
+  return `
+  <div class="pagetitle">Field Days</div>
+  <p class="sub">Every day you're signed up for, soonest first. Tap one to open it.</p>
+  ${mine.length===0 ? `<div class="card"><p class="sub" style="margin:0">You're not signed up for any days yet. Tap a day on My Schedule to join in.</p></div>` : `
+  <div class="card" style="padding:6px 18px">
+    ${mine.map(o=>{
+      const c = (load()[o.k+"_conductor"]||"");
+      return `<div class="dayrow" onclick="openDay('${o.k}')"><span><b>${fmtDate(o.date)}</b> · ${slotLabel(o.date)}${c?` · ${esc(c)}`:""}</span><span class="c">${o.activities.join(", ")}</span></div>`;
+    }).join("")}
+  </div>`}`;
+}
+// Weather: free Open-Meteo forecast, no key. The elder sets the town ZIP in
+// Settings (stored as _zip/_lat/_lon/_place in the congregation document);
+// the demo congregation defaults to Dickinson, TX.
+let weatherCache = {};   // dayKey -> {hi, lo, rain, text, icon} | {err:1} | "loading"
+function weatherPlace(){
+  const d = load();
+  if (d._lat && d._lon) return {lat:d._lat, lon:d._lon, name:d._place||"your town"};
+  if (state.cong===DEMO.congCode) return {lat:29.4609, lon:-95.0514, name:"Dickinson, TX"};
+  return null;
+}
+function wmoInfo(code){
+  if (code===0) return {text:"Clear sky", icon:"sun"};
+  if (code===1||code===2) return {text:"Partly cloudy", icon:"cloud"};
+  if (code===3) return {text:"Cloudy", icon:"cloud"};
+  if (code===45||code===48) return {text:"Foggy", icon:"cloud"};
+  if (code===51||code===53||code===55) return {text:"Drizzle", icon:"rain"};
+  if (code===61||code===63||code===65||code===66||code===67) return {text:"Rain", icon:"rain"};
+  if (code===71||code===73||code===75||code===77||code===85||code===86) return {text:"Snow", icon:"rain"};
+  if (code===80||code===81||code===82) return {text:"Rain showers", icon:"rain"};
+  if (code===95) return {text:"Thunderstorms", icon:"rain"};
+  return {text:"—", icon:"cloud"};
+}
+function fetchWeather(k){
+  const place = weatherPlace();
+  if (!place || weatherCache[k]) return;
+  weatherCache[k] = "loading";
+  const u = "https://api.open-meteo.com/v1/forecast?latitude="+place.lat+"&longitude="+place.lon+"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weathercode&temperature_unit=fahrenheit&timezone=America%2FChicago&start_date="+k+"&end_date="+k;
+  fetch(u).then(r=>r.json()).then(j=>{
+    const d = j && j.daily;
+    if (!d || !d.time || !d.time.length) { weatherCache[k] = {err:1}; }
+    else {
+      const w = wmoInfo(d.weathercode[0]);
+      weatherCache[k] = {hi:Math.round(d.temperature_2m_max[0]), lo:Math.round(d.temperature_2m_min[0]), rain:(d.precipitation_probability_max||[null])[0], text:w.text, icon:w.icon};
+    }
+    if (state.view==="daily" && (state.selDay||dayKey(new Date()))===k) render();
+  }).catch(()=>{ weatherCache[k] = {err:1}; if (state.view==="daily") render(); });
+}
+function weatherHTML(k){
+  const todayK = dayKey(new Date());
+  if (k < todayK) return "";
+  const ahead = Math.round((parseKey(k) - parseKey(todayK))/86400000);
+  if (ahead > 16) return "";
+  const place = weatherPlace();
+  if (!place) return `<div class="card"><div class="secthead">Weather</div><p class="sub" style="margin:0">Set your town's ZIP code in Settings and the forecast shows here.</p></div>`;
+  const w = weatherCache[k];
+  if (!w) { fetchWeather(k); return `<div class="card"><div class="secthead">Weather · ${esc(place.name)}</div><p class="sub" style="margin:0">Loading the forecast…</p></div>`; }
+  if (w==="loading") return `<div class="card"><div class="secthead">Weather · ${esc(place.name)}</div><p class="sub" style="margin:0">Loading the forecast…</p></div>`;
+  if (w.err) return `<div class="card"><div class="secthead">Weather · ${esc(place.name)}</div><p class="sub" style="margin:0">Couldn't load the forecast — check your connection.</p></div>`;
+  return `<div class="card"><div class="secthead">Weather · ${esc(place.name)}</div>
+    <div style="display:flex;align-items:center;gap:10px">${ic(w.icon,30)}<div><b style="font-size:18px">${w.hi}° / ${w.lo}°</b><div class="sub" style="margin:0">${esc(w.text)}${w.rain==null?"":` · ${w.rain}% chance of rain`}</div></div></div></div>`;
+}
+async function saveZip(){
+  const zip = (document.getElementById("wx-zip").value||"").trim();
+  const err = document.getElementById("wx-err");
+  if (!/^\d{5}$/.test(zip)) { err.textContent = "Enter a 5-digit ZIP code."; return; }
+  err.textContent = "Looking it up…";
+  try {
+    const r = await fetch("https://api.zippopotam.us/us/"+zip);
+    if (!r.ok) throw new Error("zip");
+    const j = await r.json();
+    const p = j.places && j.places[0];
+    if (!p) throw new Error("zip");
+    const d = load();
+    d._zip = zip; d._lat = parseFloat(p.latitude); d._lon = parseFloat(p.longitude);
+    d._place = p["place name"] + ", " + p["state abbreviation"];
+    weatherCache = {};
+    save(d); render();
+  } catch(e){ err.textContent = "Couldn't find that ZIP — check it and try again."; }
+}
+// Install as an app (PWA): the manifest + service worker make the site
+// installable. Chrome fires beforeinstallprompt; iPhones need the manual
+// Share → Add to Home Screen step, so installApp falls back to showing it.
+let deferredPrompt = null;
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeinstallprompt", e=>{ e.preventDefault(); deferredPrompt = e; });
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+    navigator.serviceWorker.register("firebase-messaging-sw.js").catch(e=>{ console.error("service worker failed", e); });
+  }
+}
+function installApp(){
+  if (deferredPrompt) {
+    deferredPrompt.prompt();
+    try { deferredPrompt.userChoice.catch(()=>{}); } catch(e){}
+    deferredPrompt = null;
+    return;
+  }
+  state.installHelp = true; render();
 }
 function getSession(){
   try { return JSON.parse(localStorage.getItem("rollcall:session")) || null; } catch(e){ return null; }
@@ -768,6 +897,7 @@ function bottomnavHTML(){
   return `<nav class="bottomnav"><div class="navinner">
     <button class="navbtn ${state.view==="schedule"?"on":""}" onclick="go('schedule')">${ic("calclock",24)}<span>My Schedule</span></button>
     <button class="navbtn ${state.view==="daily"?"on":""}" onclick="go('daily')">${ic("list",24)}<span>Daily</span></button>
+    <button class="navbtn ${state.view==="fielddays"?"on":""}" onclick="go('fielddays')">${ic("sun",24)}<span>Field Days</span></button>
     <button class="navbtn ${moreOn?"on":""}" onclick="go('more')">${ic("menu",24)}<span>More</span></button>
   </div></nav>`;
 }
@@ -808,6 +938,7 @@ function scheduleHTML(){
   return `
   <div class="pagetitle">My Schedule</div>
   ${photoPrompt}
+  ${whoOutTodayHTML()}
   <div class="monthhead">
     <h2>${m.toLocaleDateString(undefined,{month:"long",year:"numeric"})}</h2>
     <div class="monthnav">
@@ -845,6 +976,7 @@ function dailyHTML(){
     <button class="todaypill" onclick="state.selDay='${todayK}';render()">Today</button>
     <button class="daynavbtn" onclick="shiftDay(1)">${ic("chevr",20)}</button>
   </div>
+  ${weatherHTML(sel)}
   <div class="card">
     <div class="secthead">Conductor</div>
     ${conductor!=="—" ? `
@@ -916,6 +1048,12 @@ function moreHTML(){
     ${item("settings","gear","Settings")}
     ${canEditConductors() ? item("scheduler","cal","Scheduler") : ""}
     ${item("help","help","Help", true)}
+  </div>
+  <div class="card">
+    <div class="secthead">Install the app</div>
+    <p class="sub">Add Ministry Planner to your home screen and it opens like a real app — full screen, and it works even with no signal.</p>
+    <button onclick="installApp()">Add to home screen</button>
+    ${state.installHelp ? `<p class="sub" style="margin-top:10px"><b>iPhone:</b> tap Share, then "Add to Home Screen".<br><b>Android:</b> tap the three dots in Chrome, then "Install app" or "Add to Home screen".</p>` : ``}
   </div>`;
 }
 function mondayOf(d){ const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); const dow = (x.getDay()+6)%7; x.setDate(x.getDate()-dow); return x; }
@@ -1073,6 +1211,15 @@ function settingsHTML(){
   </div>
   ${canManage() ? `
   <div class="card">
+    <div class="secthead">Weather</div>
+    <p class="sub">The Daily view shows the forecast for your town. Enter the ZIP code where you usually meet.</p>
+    <label>ZIP code</label>
+    <div style="display:flex;gap:8px"><input id="wx-zip" inputmode="numeric" placeholder="e.g. 77539" value="${esc(data._zip||"")}" style="flex:1"><button class="ghost small" style="flex:none;margin:0" onclick="saveZip()">Save</button></div>
+    <div class="err" id="wx-err"></div>
+    ${data._place ? `<p class="sub">Showing weather for ${esc(data._place)}.</p>` : ``}
+  </div>` : ``}
+  ${canManage() ? `
+  <div class="card">
     <div class="secthead">Add a publisher</div>
     <p class="sub">Hand out publisher codes in person. Once added, they can sign in with the congregation code and their publisher code.</p>
     <label>Name</label>
@@ -1199,6 +1346,10 @@ function helpHTML(){
     <p class="sub">You sign in with a congregation code and your publisher code — no email, no password. The elder hands both codes out in person. Once you're signed in, you stay signed in on this device.</p>
     <div class="secthead">For the elder</div>
     <p class="sub">One elder sets up the congregation and manages roles from Settings. Conductors set the day's conductor in the Scheduler (More menu) and who has territory in Settings. If a code leaks, rotate it in Settings and hand the new one out in person.</p>
+    <div class="secthead">Installing the app</div>
+    <p class="sub">On Android, open the More menu and tap "Add to home screen". On iPhone, tap Share, then "Add to Home Screen". It opens full screen like a real app and works even with no signal.</p>
+    <div class="secthead">Weather</div>
+    <p class="sub">The Daily view shows the forecast for the town your elder set in Settings (ZIP code). It covers today and the next two weeks.</p>
     <div class="secthead">About this app</div>
     <p class="sub">Everything is stored in your congregation's shared, synced database — sign-ups, conductors and chats update live on everyone's phones.</p>
   </div>`;
@@ -1212,6 +1363,7 @@ function render(){
   let body = "";
   if (state.view==="schedule") body = scheduleHTML();
   else if (state.view==="daily") body = dailyHTML();
+  else if (state.view==="fielddays") body = fieldDaysHTML();
   else if (state.view==="more") body = moreHTML();
   else if (state.view==="profile") body = profileHTML();
   else if (state.view==="settings") body = settingsHTML();
