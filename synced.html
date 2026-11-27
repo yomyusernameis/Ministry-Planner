@@ -183,7 +183,7 @@
    - D1 SETTLED (Nov 23): sign-ups open as far ahead as the conductor
      schedule is known — the board lists days from today through the last day
      with a conductor set (no fixed cap). Past days drop off at midnight (12:00 AM) and today is highlighted.
-   Demo: "Try the demo" makes your own publisher account in the Dickinson Congregation demo (code DEMO, fresh 9-char code + profile step) — nobody logs in as Cayden. The demo's Manager account is seeded with a generated code stored only in Firestore, and no phone number is in this file.
+   Demo: "Try the demo" makes your own publisher account in a local-only Dickinson Congregation demo (fresh 9-char code + profile step) — nobody logs in as Cayden, nothing syncs, and nobody else can see it. The demo Manager (Cayden) is seeded on-device; no phone number is in this file.
    Emptied Nov 23 for testing: the demo starts with just Cayden — no seeded
    conductors, sign-ups, or territory. Add publishers in Settings (Manager).
    All data lives in one Firestore document per congregation (collection "congregations", document ID = the congregation code),
@@ -266,14 +266,35 @@ try {
 let congCache = {};       // latest congregation document data ({} while loading)
 let congLoaded = false;   // true once the first snapshot has arrived
 let congUnsub = null;     // onSnapshot unsubscribe for the current congregation
+const LOCAL_DEMO_KEY = "rollcall:demo:local";
+let localDemoData = null; // parsed local demo document (only when state.localDemo)
 function congRef(code){ return db.collection("congregations").doc(code || state.cong); }
-function load(){ return congCache || {}; }
+// The demo is local-only (Nov 26): "Try the demo" keeps everything on the
+// phone — no Firestore reads or writes, so demo users never see each other.
+function loadLocalDemo(){
+  if (localDemoData) return localDemoData;
+  try { localDemoData = JSON.parse(localStorage.getItem(LOCAL_DEMO_KEY)) || null; } catch(e){ localDemoData = null; }
+  if (!localDemoData) {
+    const mgr = genCode(9);
+    localDemoData = {_v:6, _seeded:true, _name: DEMO.congName, _manager: mgr, _people:{}};
+    localDemoData._people[mgr] = {first:"Cayden", last:"Orton-Kater", role:"manager", phone:""};
+    try { localStorage.setItem(LOCAL_DEMO_KEY, JSON.stringify(localDemoData)); } catch(e){}
+  }
+  return localDemoData;
+}
+function load(){ return state.localDemo ? loadLocalDemo() : (congCache || {}); }
 function save(data){
+  if (state.localDemo) {
+    localDemoData = data;
+    try { localStorage.setItem(LOCAL_DEMO_KEY, JSON.stringify(data)); } catch(e){}
+    return;
+  }
   congCache = data;
   if (!state.cong || !db) return;
   congRef().set(data, {merge:true}).catch(e=>{ console.error("save failed", e); });
 }
 function attachListener(){
+  if (state.localDemo) return;
   if (congUnsub) { congUnsub(); congUnsub = null; }
   congLoaded = false;
   if (!state.cong || !db) return;
@@ -294,19 +315,6 @@ function attachListener(){
 }
 function detachListener(){
   if (congUnsub) { congUnsub(); congUnsub = null; }
-}
-// The demo congregation lives in the shared DEMO document. Its Manager
-// account is seeded with a code generated at seed time (stored only in
-// Firestore, never in this file) and no phone number.
-async function ensureDemoSeeded(){
-  const ref = congRef(DEMO.congCode);
-  const snap = await ref.get().catch(()=>null);
-  if (snap && snap.exists) return snap.data() || {};
-  const mgr = genCode(9);
-  const data = {_v:6, _seeded:true, _name: DEMO.congName, _manager: mgr, _people:{}};
-  data._people[mgr] = {first:"Cayden", last:"Orton-Kater", role:"manager", phone:""};
-  await ref.set(data);
-  return data;
 }
 function people(){
   const d = load();
@@ -499,9 +507,9 @@ function installApp(){
 function getSession(){
   try { return JSON.parse(localStorage.getItem("rollcall:session")) || null; } catch(e){ return null; }
 }
-function setSession(){ localStorage.setItem("rollcall:session", JSON.stringify({cong:state.cong, me:state.me})); }
+function setSession(){ localStorage.setItem("rollcall:session", JSON.stringify({cong:state.cong, me:state.me, localDemo:!!state.localDemo})); }
 function clearSession(){ localStorage.removeItem("rollcall:session"); }
-let state = {cong:null, me:null, view:"schedule", month: monthStart(new Date()), selDay: dayKey(new Date()), popup:null, copied:false, dayPopup:null, joinPick:false, mentionFor:null, chatDraft:{}, schedWeek:null, schedDay:null, firstPhoto:null, newCongCode:"", newPubCode:"", firstShowCodes:false, copiedCode:null, addedPub:null};
+let state = {cong:null, me:null, localDemo:false, view:"schedule", month: monthStart(new Date()), selDay: dayKey(new Date()), popup:null, copied:false, dayPopup:null, joinPick:false, mentionFor:null, chatDraft:{}, schedWeek:null, schedDay:null, firstPhoto:null, newCongCode:"", newPubCode:"", firstShowCodes:false, copiedCode:null, addedPub:null};
 
 function renderLogin(msg){
   const app = document.getElementById("app");
@@ -514,7 +522,7 @@ function renderLogin(msg){
     <button class="optbtn" onclick="renderSetup()">${ic("cal",26)}<span><b>Set up a congregation</b><i>For the elder setting it up — you'll get the codes to hand out</i></span></button>
     ${msg?`<div class="err">${msg}</div>`:""}
     <button class="ghost" onclick="demoLogin()">Try the demo</button>
-    <div class="infobox">Demo — <b>Dickinson Congregation</b> (code <b>DEMO</b>). Tap "Try the demo" to make your own account and set up your profile. Then mark yourself in for a day and look around.</div>
+    <div class="infobox">Demo — <b>Dickinson Congregation</b>. Tap "Try the demo" to make your own account and look around. The demo lives only on this phone — nothing you do in it is shared, and you won't see anyone else in it.</div>
   </div>`;
 }
 function renderJoin(msg){
@@ -583,13 +591,10 @@ async function doLogin(){
   const cong = document.getElementById("cong").value.trim().toUpperCase();
   const pub = document.getElementById("pub").value.trim().toUpperCase();
   let data = null;
-  if (cong === DEMO.congCode) {
-    data = await ensureDemoSeeded();
-  } else {
-    const snap = await congRef(cong).get().catch(()=>null);
-    if (!snap || !snap.exists) return renderJoin("That congregation code isn't recognized in this demo. Try DEMO — or set up a new congregation from the front menu.");
-    data = snap.data() || {};
-  }
+  if (cong === DEMO.congCode) { demoLogin(); return; }
+  const snap = await congRef(cong).get().catch(()=>null);
+  if (!snap || !snap.exists) return renderJoin("That congregation code isn't recognized. Check the code, or tap 'Try the demo' to look around — or set up a new congregation from the front menu.");
+  data = snap.data() || {};
   state.cong = cong;
   if (!data._v) data._v = 6;
   congCache = data; congLoaded = true;
@@ -599,9 +604,10 @@ async function doLogin(){
   state.me = pub;
   afterLogin();
 }
-async function demoLogin(){
+function demoLogin(){
+  state.localDemo = true;
   state.cong = DEMO.congCode;
-  const data = await ensureDemoSeeded();
+  const data = loadLocalDemo();
   const ps = data._people || {};
   let code = genCode(9);
   while (ps[code]) code = genCode(9);
@@ -612,8 +618,7 @@ async function demoLogin(){
   state.firstShowCodes = false;
   state.demoAccount = true;
   state.firstPhoto = null;
-  congCache = data; congLoaded = true;
-  attachListener();
+  congLoaded = true;
   setSession();
   renderFirstProfile();
 }
@@ -695,7 +700,7 @@ function copyText(btn, code){
   setTimeout(()=>{ btn.textContent = old; }, 1500);
 }
 function clearAddedPub(){ state.addedPub = null; render(); }
-function logout(){ detachListener(); clearSession(); state = {cong:null, me:null, view:"schedule", month: monthStart(new Date()), selDay: dayKey(new Date()), popup:null, copied:false, dayPopup:null, joinPick:false, mentionFor:null, chatDraft:{}, schedWeek:null, schedDay:null, firstPhoto:null, newCongCode:"", newPubCode:"", firstShowCodes:false, copiedCode:null, addedPub:null}; renderLogin(""); }
+function logout(){ detachListener(); if (state.localDemo) { try { localStorage.removeItem(LOCAL_DEMO_KEY); } catch(e){} localDemoData = null; } clearSession(); state = {cong:null, me:null, localDemo:false, view:"schedule", month: monthStart(new Date()), selDay: dayKey(new Date()), popup:null, copied:false, dayPopup:null, joinPick:false, mentionFor:null, chatDraft:{}, schedWeek:null, schedDay:null, firstPhoto:null, newCongCode:"", newPubCode:"", firstShowCodes:false, copiedCode:null, addedPub:null}; renderLogin(""); }
 function go(view){ state.view = view; state.popup = null; state.dayPopup = null; state.joinPick = false; state.mentionFor = null; state.schedWeek = null; state.schedDay = null; render(); }
 function openDay(k){ state.month = monthStart(parseKey(k)); state.dayPopup = k; state.joinPick = false; state.mentionFor = null; state.popup = null; render(); }
 function closeDayPopup(){ state.dayPopup = null; state.joinPick = false; state.mentionFor = null; render(); }
@@ -1263,7 +1268,7 @@ function settingsHTML(){
         ${personName(code)}
       </label>`).join("")}
   </div>` : ``}
-  <p class="footer">Ministry Planner · ${congName()} · Synced</p>`;
+  <p class="footer">Ministry Planner · ${congName()} · ${state.localDemo ? "Demo — only on this phone" : "Synced"}</p>`;
 }
 function saveRoles(){
   const data = load(); data._roles = data._roles || {};
@@ -1294,10 +1299,11 @@ function removePublisher(code, btn){
   if (d._roles) delete d._roles[code];
   if (d._territory) delete d._territory[code];
   if (d._welcomed) delete d._welcomed[code];
-  if (db && Object.keys(updates).length) congRef().update(updates).catch(e=>{ console.error("remove publisher failed", e); });
+  if (!state.localDemo && db && Object.keys(updates).length) congRef().update(updates).catch(e=>{ console.error("remove publisher failed", e); });
   render();
 }
 async function deleteCongregation(){
+  if (state.localDemo) { try { localStorage.removeItem(LOCAL_DEMO_KEY); } catch(e){} localDemoData = null; logout(); return; }
   if (!canManage() || state.cong==="DEMO" || !db) return;
   detachListener();
   try { await congRef().delete(); }
@@ -1389,16 +1395,25 @@ function render(){
   const s = getSession();
   if (s && s.cong && s.me) {
     state.cong = s.cong; state.me = s.me;
-    const snap = await congRef().get().catch(()=>null);
-    const data = (snap && snap.exists) ? (snap.data()||{}) : {};
-    if (!data._v) data._v = 6;
-    congCache = data; congLoaded = true;
-    attachListener();
+    // Any DEMO session is local now — old shared-demo sessions open a fresh
+    // local demo instead of the shared document.
+    state.localDemo = s.localDemo || s.cong === DEMO.congCode;
+    let data;
+    if (state.localDemo) {
+      data = loadLocalDemo();
+      congLoaded = true;
+    } else {
+      const snap = await congRef().get().catch(()=>null);
+      data = (snap && snap.exists) ? (snap.data()||{}) : {};
+      if (!data._v) data._v = 6;
+      congCache = data; congLoaded = true;
+      attachListener();
+    }
     const p = (data._people||{})[s.me];
     if (p) { render(); return; }
     detachListener();
     clearSession();
-    state.cong = null; state.me = null;
+    state.cong = null; state.me = null; state.localDemo = false;
   }
   renderLogin("");
 })();
