@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MP</title>
+<title>Ministry Planner</title>
 <link id="favicon" rel="icon" href="">
 <style>
   :root{--navy:#1b2a4a;--gold:#f2b705;--blue:#2f80ed;--green:#16a34a;--green-dark:#166534;--green-soft:#eaf5ee;--ink:#111827;--muted:#6b7280;--line:#e5e7eb;--bg:#f7f8fa}
@@ -138,9 +138,12 @@
 </head>
 <body>
 <div id="app"></div>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
-/* MP — working prototype (front-end demo, no backend yet). Renamed from
-   "Ministry Planner" Nov 25, 2026.
+/* Ministry Planner — synced version (Firebase/Firestore backend).
+   Brand restored to "Ministry Planner" Nov 26, 2026 (MP is only the acronym).
    Renamed Nov 23, 2026 (was "Service Roll Call"). Lighthouse-style redesign:
    dark navy top bar + bottom nav (My Schedule / Daily / More), month calendar
    as the main view, Daily view with conductor + time + what friends are doing,
@@ -173,10 +176,10 @@
    - D1 SETTLED (Nov 23): sign-ups open as far ahead as the conductor
      schedule is known — the board lists days from today through the last day
      with a conductor set (no fixed cap). Past days drop off at midnight (12:00 AM) and today is highlighted.
-   Demo: "Try the demo" makes your own publisher account in congregation DEMO (fresh 9-char code + profile step) — nobody logs in as Cayden. Cayden P-101 stays as the demo congregation's Manager in the seeded data.
+   Demo: "Try the demo" makes your own publisher account in the Dickinson Congregation demo (code DEMO, fresh 9-char code + profile step) — nobody logs in as Cayden. The demo's Manager account is seeded with a generated code stored only in Firestore, and no phone number is in this file.
    Emptied Nov 23 for testing: the demo starts with just Cayden — no seeded
    conductors, sign-ups, or territory. Add publishers in Settings (Manager).
-   All data stays in this browser's localStorage, namespaced by congregation code,
+   All data lives in one Firestore document per congregation (collection "congregations", document ID = the congregation code),
    so one congregation can never see another's list.   Third round same evening (Lighthouse reference screenshots): Arrived check-in for today — removed Nov 24 at Cayden's request (green Arrived button + Arrived/Accepted tags in the day list; v6 migration drops the stored k+"_arrived" data).
   Fourth round same evening (Lighthouse month calendar): every day cell always shows all 5 activity rows (icon only when empty, count when people signed up, green when you're in) — empty days no longer look blank. Every cell is tappable, including the dimmed out-of-month days: tapping one jumps to that month and opens its day popup (openDay sets the month from the tapped day).
   Fifth round same evening (Scheduler): More menu has a Scheduler tab (Manager/Conductor only) and the conductor editor moved out of Settings into it. Conducting is per DAY, not per week: Scheduler shows a week list — tap a week, then a day Mon–Sun, then the person conducting that day (one conductor per day; Clear conductor removes them). The list always runs through one blank week ahead of the last week with anyone set — set someone in the blank week and the next week opens up after it. No version bump (same k+"_conductor" keys).
@@ -188,9 +191,7 @@ const ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8x
 const ACTIVITIES = ["Door to door","Letters","Calls/Returns","Study","Carts"];
 const DEMO = {
   congCode: "DEMO",
-  people: {
-    "P-101": {first:"Cayden", last:"Orton-Kater", role:"manager", phone:""}
-  }
+  congName: "Dickinson Congregation"
 };
 const P = {
   cal:'<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
@@ -235,72 +236,70 @@ function arr(v){ return Array.isArray(v) ? v : (typeof v==="string" ? [v] : []);
 function esc(s){ return String(s??"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function fmtDate(d){ return d.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"}); }
 function fmtLong(d){ return d.toLocaleDateString(undefined,{weekday:"short",month:"long",day:"numeric"}); }
-function storeKey(){ return "rollcall:" + (state.cong||"DEMO"); }
-function load(){
-  let d = {};
-  try { d = JSON.parse(localStorage.getItem(storeKey())) || {}; } catch(e){ d = {}; }
-  if (d._v !== 6) d = migrate(d);
-  return d;
+// ---- Synced backend: Firebase (Firestore) ----
+// Project "MP App" (mp-app-21042), Spark plan. The web apiKey below is a
+// public identifier, not a secret — embedding it in the app is normal.
+const firebaseConfig = {
+  apiKey: "AIzaSyA0jo1X28QVNsSmbacAEJqtDo4hINfhKCk",
+  authDomain: "mp-app-21042.firebaseapp.com",
+  projectId: "mp-app-21042",
+  storageBucket: "mp-app-21042.firebasestorage.app",
+  messagingSenderId: "1977223375",
+  appId: "1:1977223375:web:a8447e410d37100e454fba"
+};
+let db = null, auth = null;
+try {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+  auth = firebase.auth();
+} catch(e){ console.error("Firebase init failed", e); }
+let congCache = {};       // latest congregation document data ({} while loading)
+let congLoaded = false;   // true once the first snapshot has arrived
+let congUnsub = null;     // onSnapshot unsubscribe for the current congregation
+function congRef(code){ return db.collection("congregations").doc(code || state.cong); }
+function load(){ return congCache || {}; }
+function save(data){
+  congCache = data;
+  if (!state.cong || !db) return;
+  congRef().set(data, {merge:true}).catch(e=>{ console.error("save failed", e); });
 }
-function save(data){ localStorage.setItem(storeKey(), JSON.stringify(data)); }
-function migrate(d){
-  const out = {_v:6};
-  const old = d._people || {};
-  out._people = {};
-  Object.keys(old).forEach(code=>{
-    const p = old[code]||{};
-    if (p.first) {
-      out._people[code] = {first:p.first, last:p.last||"", role:p.role||"publisher", phone:p.phone||""};
-      if (p.photo) out._people[code].photo = p.photo;
+function attachListener(){
+  if (congUnsub) { congUnsub(); congUnsub = null; }
+  congLoaded = false;
+  if (!state.cong || !db) return;
+  congUnsub = congRef().onSnapshot(snap=>{
+    if (snap.exists) {
+      const data = snap.data() || {};
+      if (!data._v) data._v = 6;
+      congCache = data;
     } else {
-      const parts = String(p.name||code).trim().split(/\s+/);
-      out._people[code] = {first:parts[0]||code, last:parts.slice(1).join(" ")||"", role:p.role||"publisher", phone:p.phone||""};
+      congCache = {};
     }
-  });
-  Object.keys(d).forEach(k=>{
-    if (k.startsWith("_")) return;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(k)) {
-      const day = d[k]||{};
-      const nd = {};
-      Object.keys(day).forEach(code=>{
-        const v = day[code];
-        if (typeof v === "string" && ACTIVITIES.includes(v)) nd[code] = [v];
-        else if (Array.isArray(v)) { const f = v.filter(x=>ACTIVITIES.includes(x)); if (f.length) nd[code] = f; }
-      });
-      out[k] = nd;
-    } else {
-      out[k] = d[k];
-    }
-  });
-  if (d._roles) out._roles = d._roles;
-  if (d._territory) out._territory = d._territory;
-  if (d._welcomed) out._welcomed = d._welcomed;
-  // v5: "leader" is now "conductor"
-  Object.keys(out).forEach(k=>{
-    if (k.endsWith("_leader")){ out[k.slice(0,-7)+"_conductor"] = out[k]; delete out[k]; }
-  });
-  if (out._roles) Object.keys(out._roles).forEach(c=>{ if (out._roles[c]==="leader") out._roles[c]="conductor"; });
-  // v6: Arrived check-in removed — drop the stored arrival data
-  Object.keys(out).forEach(k=>{
-    if (k.endsWith("_arrived")) delete out[k];
-  });
-  out._seeded = true;
-  save(out);
-  return out;
+    congLoaded = true;
+    const d = congCache;
+    // Only re-render once the user is past the first-profile step, so a
+    // live update never wipes a profile form someone is filling in.
+    if (state.me && d._welcomed && d._welcomed[state.me]) render();
+  }, err=>{ console.error("listen failed", err); });
 }
-function seed(data){
-  if (data._seeded) return data;
-  data._seeded = true; save(data); return data;
+function detachListener(){
+  if (congUnsub) { congUnsub(); congUnsub = null; }
+}
+// The demo congregation lives in the shared DEMO document. Its Manager
+// account is seeded with a code generated at seed time (stored only in
+// Firestore, never in this file) and no phone number.
+async function ensureDemoSeeded(){
+  const ref = congRef(DEMO.congCode);
+  const snap = await ref.get().catch(()=>null);
+  if (snap && snap.exists) return snap.data() || {};
+  const mgr = genCode(9);
+  const data = {_v:6, _seeded:true, _name: DEMO.congName, _manager: mgr, _people:{}};
+  data._people[mgr] = {first:"Cayden", last:"Orton-Kater", role:"manager", phone:""};
+  await ref.set(data);
+  return data;
 }
 function people(){
   const d = load();
-  if (state.cong === DEMO.congCode) {
-    const merged = {};
-    Object.keys(DEMO.people).forEach(code=>{ merged[code] = Object.assign({}, DEMO.people[code]); });
-    const over = d._people || {};
-    Object.keys(over).forEach(code=>{ merged[code] = Object.assign({}, merged[code]||{}, over[code]); });
-    return merged;
-  }
   return d._people || {};
 }
 function personName(code){ const p = people()[code]; return p ? ((p.first||"") + " " + (p.last||"")).trim() : code; }
@@ -315,11 +314,9 @@ function hasTerritory(code){ const d = load(); return !!(d._territory && d._terr
 function canManage(){ return personRole(state.me)==="manager"; }
 function canEditConductors(){ const r = personRole(state.me); return r==="manager" || r==="conductor"; }
 function congName(){
-  if (state.cong === DEMO.congCode) return "Congregation DEMO";
-  try {
-    const reg = JSON.parse(localStorage.getItem("rollcall:congs")||"{}");
-    return (reg[state.cong] && reg[state.cong].name) || state.cong;
-  } catch(e){ return state.cong; }
+  if (state.cong === DEMO.congCode) return DEMO.congName;
+  const d = load();
+  return d._name || state.cong;
 }
 function codeByName(name){
   const n = String(name||"").trim().toLowerCase();
@@ -381,22 +378,21 @@ function renderLogin(msg){
   const app = document.getElementById("app");
   app.className = "";
   app.innerHTML = `
-  <div class="loginbrand"><img src="${ICON}" alt="MP"><h1>MP</h1><p class="sub">Who's going out — so nobody walks into an empty outing.</p></div>
-  <div class="infobox"><b>Prototype.</b> No email, no password, nothing leaves this device yet.
-  The real version needs a backend for the codes to work across phones.</div>
+  <div class="loginbrand"><img src="${ICON}" alt="Ministry Planner"><h1>Ministry Planner</h1><p class="sub">Who's going out — so nobody walks into an empty outing.</p></div>
+  <div class="infobox"><b>Synced.</b> No email, no password — sign-ups and chats update live on everyone's phones.</div>
   <div class="card">
     <button class="optbtn" onclick="renderJoin('')">${ic("user",26)}<span><b>Join a congregation</b><i>Sign in with your congregation and publisher codes</i></span></button>
     <button class="optbtn" onclick="renderSetup()">${ic("cal",26)}<span><b>Set up a congregation</b><i>For the elder setting it up — you'll get the codes to hand out</i></span></button>
     ${msg?`<div class="err">${msg}</div>`:""}
     <button class="ghost" onclick="demoLogin()">Try the demo</button>
-    <div class="infobox">Demo — congregation <b>DEMO</b>. Tap "Try the demo" to make your own account — you'll get your own publisher code and set up your profile. Then mark yourself in for a day and look around.</div>
+    <div class="infobox">Demo — <b>Dickinson Congregation</b> (code <b>DEMO</b>). Tap "Try the demo" to make your own account and set up your profile. Then mark yourself in for a day and look around.</div>
   </div>`;
 }
 function renderJoin(msg){
   const app = document.getElementById("app");
   app.className = "";
   app.innerHTML = `
-  <div class="loginbrand"><img src="${ICON}" alt="MP"><h1>MP</h1><p class="sub">Join with the codes your elder handed you in person.</p></div>
+  <div class="loginbrand"><img src="${ICON}" alt="Ministry Planner"><h1>Ministry Planner</h1><p class="sub">Join with the codes your elder handed you in person.</p></div>
   <div class="card">
     <label>Congregation code</label>
     <input id="cong" placeholder="12 letters and numbers" autocomplete="off" autocapitalize="characters">
@@ -411,7 +407,7 @@ function renderSetup(){
   const app = document.getElementById("app");
   app.className = "";
   app.innerHTML = `
-  <div class="loginbrand"><img src="${ICON}" alt="MP"><h1>MP</h1><p class="sub">One elder sets up the congregation, then manages roles from there.</p></div>
+  <div class="loginbrand"><img src="${ICON}" alt="Ministry Planner"><h1>Ministry Planner</h1><p class="sub">One elder sets up the congregation, then manages roles from there.</p></div>
   <div class="card">
     <label>Congregation name</label>
     <input id="cname" placeholder="e.g. Santa Fe Congregation">
@@ -420,32 +416,31 @@ function renderSetup(){
     <div class="err" id="err"></div>
     <button onclick="doSetup()">Create congregation</button>
     <button class="ghost" onclick="renderLogin('')">Back</button>
-    <div class="infobox">You become the Manager: you hand out the congregation code and publisher codes in person, and you assign roles. Your codes are made for you — a 12-letter-and-number congregation code and a 9-letter-and-number publisher code. Demo: everything is stored on this device only.</div>
+    <div class="infobox">You become the Manager: you hand out the congregation code and publisher codes in person, and you assign roles. Your codes are made for you — a 12-letter-and-number congregation code and a 9-letter-and-number publisher code. Everything syncs live — sign-ups, conductors and chats show up on everyone's phones.</div>
   </div>`;
 }
-function doSetup(){
+async function doSetup(){
   const name = document.getElementById("cname").value.trim();
   const ename = document.getElementById("ename").value.trim();
   const err = document.getElementById("err");
   if (!name || !ename) { err.textContent = "Fill in every field."; return; }
-  let reg = {};
-  try { reg = JSON.parse(localStorage.getItem("rollcall:congs")||"{}"); } catch(e){ reg = {}; }
   let code = genCode(12);
-  while (code === DEMO.congCode || reg[code]) code = genCode(12);
+  while (code === DEMO.congCode) code = genCode(12);
+  let snap = await congRef(code).get().catch(()=>null);
+  while (snap && snap.exists) { code = genCode(12); snap = await congRef(code).get().catch(()=>null); }
   const epub = genCode(9);
-  reg[code] = {name:name, manager: epub};
-  localStorage.setItem("rollcall:congs", JSON.stringify(reg));
   state.cong = code; state.me = epub;
   state.newCongCode = code; state.newPubCode = epub; state.firstShowCodes = true; state.firstPhoto = null;
   const parts = ename.split(/\s+/);
-  const d = load();
-  d._people = {}; d._people[epub] = {first:parts[0]||ename, last:parts.slice(1).join(" ")||"", role:"manager", phone:""};
-  save(d);
+  const d = {_v:6, _seeded:true, _name:name, _manager:epub, _people:{}};
+  d._people[epub] = {first:parts[0]||ename, last:parts.slice(1).join(" ")||"", role:"manager", phone:""};
+  congCache = d; congLoaded = true;
+  attachListener();
+  await congRef(code).set(d).catch(e=>{ console.error("setup failed", e); });
   setSession();
   renderFirstProfile();
 }
 function afterLogin(){
-  seed(load());
   setSession();
   const d = load();
   if (!(d._welcomed && d._welcomed[state.me])){
@@ -455,21 +450,30 @@ function afterLogin(){
   }
   render();
 }
-function doLogin(){
+async function doLogin(){
   const cong = document.getElementById("cong").value.trim().toUpperCase();
   const pub = document.getElementById("pub").value.trim().toUpperCase();
-  let reg = {};
-  try { reg = JSON.parse(localStorage.getItem("rollcall:congs")||"{}"); } catch(e){ reg = {}; }
-  if (cong !== DEMO.congCode && !reg[cong]) return renderJoin("That congregation code isn't recognized in this demo. Try DEMO — or set up a new congregation from the front menu.");
+  let data = null;
+  if (cong === DEMO.congCode) {
+    data = await ensureDemoSeeded();
+  } else {
+    const snap = await congRef(cong).get().catch(()=>null);
+    if (!snap || !snap.exists) return renderJoin("That congregation code isn't recognized in this demo. Try DEMO — or set up a new congregation from the front menu.");
+    data = snap.data() || {};
+  }
   state.cong = cong;
-  const person = people()[pub];
-  if (!person) return renderJoin("That publisher code isn't recognized for this congregation. Check the code and try again.");
+  if (!data._v) data._v = 6;
+  congCache = data; congLoaded = true;
+  attachListener();
+  const person = (data._people || {})[pub];
+  if (!person) { detachListener(); state.cong = null; return renderJoin("That publisher code isn't recognized for this congregation. Check the code and try again."); }
   state.me = pub;
   afterLogin();
 }
-function demoLogin(){
+async function demoLogin(){
   state.cong = DEMO.congCode;
-  const ps = people();
+  const data = await ensureDemoSeeded();
+  const ps = data._people || {};
   let code = genCode(9);
   while (ps[code]) code = genCode(9);
   state.me = code;
@@ -479,7 +483,8 @@ function demoLogin(){
   state.firstShowCodes = false;
   state.demoAccount = true;
   state.firstPhoto = null;
-  seed(load());
+  congCache = data; congLoaded = true;
+  attachListener();
   setSession();
   renderFirstProfile();
 }
@@ -491,7 +496,7 @@ function renderFirstProfile(){
   const ini = ((p.first||"?")[0]||"?") + ((p.last||"")[0]||"");
   const col = AVCOLORS[hashCode(state.me) % AVCOLORS.length];
   app.innerHTML = `
-  <div class="loginbrand"><img src="${ICON}" alt="MP"><h1>MP</h1><p class="sub">Set up your profile — this is what friends see when they tap your name.</p></div>
+  <div class="loginbrand"><img src="${ICON}" alt="Ministry Planner"><h1>Ministry Planner</h1><p class="sub">Set up your profile — this is what friends see when they tap your name.</p></div>
   ${state.firstShowCodes ? `
   <div class="card">
     <div class="secthead">${state.demoAccount ? "Your demo account" : "Your congregation is ready"}</div>
@@ -561,7 +566,7 @@ function copyText(btn, code){
   setTimeout(()=>{ btn.textContent = old; }, 1500);
 }
 function clearAddedPub(){ state.addedPub = null; render(); }
-function logout(){ clearSession(); state = {cong:null, me:null, view:"schedule", month: monthStart(new Date()), selDay: dayKey(new Date()), popup:null, copied:false, dayPopup:null, joinPick:false, mentionFor:null, chatDraft:{}, schedWeek:null, schedDay:null, firstPhoto:null, newCongCode:"", newPubCode:"", firstShowCodes:false, copiedCode:null, addedPub:null}; renderLogin(""); }
+function logout(){ detachListener(); clearSession(); state = {cong:null, me:null, view:"schedule", month: monthStart(new Date()), selDay: dayKey(new Date()), popup:null, copied:false, dayPopup:null, joinPick:false, mentionFor:null, chatDraft:{}, schedWeek:null, schedDay:null, firstPhoto:null, newCongCode:"", newPubCode:"", firstShowCodes:false, copiedCode:null, addedPub:null}; renderLogin(""); }
 function go(view){ state.view = view; state.popup = null; state.dayPopup = null; state.joinPick = false; state.mentionFor = null; state.schedWeek = null; state.schedDay = null; render(); }
 function openDay(k){ state.month = monthStart(parseKey(k)); state.dayPopup = k; state.joinPick = false; state.mentionFor = null; state.popup = null; render(); }
 function closeDayPopup(){ state.dayPopup = null; state.joinPick = false; state.mentionFor = null; render(); }
@@ -599,12 +604,16 @@ function insertMention(tag, code){
 function sendChat(k, tag){
   const text = (state.chatDraft[tag]||"").trim();
   if (!text) return;
+  // Atomic append: two people chatting at once must not clobber each other,
+  // so the message goes up with arrayUnion, not a whole-document save.
+  const msg = {who: state.me, text, at: Date.now()};
   const d = load();
   d[k+"_chat"] = d[k+"_chat"]||[];
-  d[k+"_chat"].push({who: state.me, text, at: Date.now()});
+  d[k+"_chat"].push(msg);
   state.chatDraft[tag] = "";
   state.mentionFor = null;
-  save(d); render();
+  if (db) congRef().update({[k+"_chat"]: firebase.firestore.FieldValue.arrayUnion(msg)}).catch(e=>{ console.error("chat send failed", e); });
+  render();
 }
 function renderMentions(text){
   const entries = Object.keys(people()).map(code=>({code, name: personName(code), first:(people()[code]||{}).first||""})).filter(e=>e.name);
@@ -750,7 +759,7 @@ function popupHTML(code){
 
 function topbarHTML(){
   return `<header class="topbar">
-    <div class="brand"><img class="brandicon" src="${ICON}" alt=""><span>MP</span></div>
+    <div class="brand"><img class="brandicon" src="${ICON}" alt=""><span>Ministry Planner</span></div>
     <button class="avatarbtn" onclick="go('profile')">${avatar(state.me, 36)}</button>
   </header>`;
 }
@@ -949,8 +958,13 @@ function setConductor(code){
 }
 function clearConductor(){
   const d = load();
-  delete d[state.schedDay+"_conductor"];
-  save(d); state.schedDay = null; render();
+  const key = state.schedDay+"_conductor";
+  delete d[key];
+  state.schedDay = null;
+  // A whole-document save with merge:true would not delete the field on the
+  // server, so clear it atomically instead.
+  if (db) congRef().update({[key]: firebase.firestore.FieldValue.delete()}).catch(e=>{ console.error("clear conductor failed", e); });
+  render();
 }
 function schedulerHTML(){
   if (!canEditConductors()) return `<div class="pagetitle">Scheduler</div><div class="card"><p class="sub">Only the elder (Manager) or a Conductor can set the day's conductor.</p></div>`;
@@ -1100,7 +1114,7 @@ function settingsHTML(){
         ${personName(code)}
       </label>`).join("")}
   </div>` : ``}
-  <p class="footer">MP · ${congName()} · Prototype — data stays on this device</p>`;
+  <p class="footer">Ministry Planner · ${congName()} · Synced</p>`;
 }
 function saveRoles(){
   const data = load(); data._roles = data._roles || {};
@@ -1152,8 +1166,8 @@ function helpHTML(){
     <p class="sub">You sign in with a congregation code and your publisher code — no email, no password. The elder hands both codes out in person. Once you're signed in, you stay signed in on this device.</p>
     <div class="secthead">For the elder</div>
     <p class="sub">One elder sets up the congregation and manages roles from Settings. Conductors set the day's conductor in the Scheduler (More menu) and who has territory in Settings. If a code leaks, rotate it in Settings and hand the new one out in person.</p>
-    <div class="secthead">About this prototype</div>
-    <p class="sub">Everything is stored on this device only for now. The real app needs a backend so codes and sign-ups sync across everyone's phones.</p>
+    <div class="secthead">About this app</div>
+    <p class="sub">Everything is stored in your congregation's shared, synced database — sign-ups, conductors and chats update live on everyone's phones.</p>
   </div>`;
 }
 function render(){
@@ -1174,14 +1188,32 @@ function render(){
   state._lastView = state.view;
   if (typeof window !== "undefined" && window.scrollTo) window.scrollTo(0, viewChanged ? 0 : y);
 }
-(function boot(){
+(async function boot(){
   document.getElementById("favicon").href = ICON;
+  const app = document.getElementById("app");
+  if (!db || !auth) {
+    app.innerHTML = `<div class="loginbrand"><img src="${ICON}" alt="Ministry Planner"><h1>Ministry Planner</h1><p class="sub">Couldn't reach the sync service. Check your connection and reload.</p></div>`;
+    return;
+  }
+  app.innerHTML = `<div class="loginbrand"><img src="${ICON}" alt="Ministry Planner"><h1>Ministry Planner</h1><p class="sub">Connecting…</p></div>`;
+  try { await auth.signInAnonymously(); }
+  catch(e){
+    app.innerHTML = `<div class="loginbrand"><img src="${ICON}" alt="Ministry Planner"><h1>Ministry Planner</h1><p class="sub">Couldn't sign in to the sync service. Check your connection and reload.</p></div>`;
+    return;
+  }
   const s = getSession();
   if (s && s.cong && s.me) {
     state.cong = s.cong; state.me = s.me;
-    const p = people()[s.me];
-    if (p) { seed(load()); render(); return; }
+    const snap = await congRef().get().catch(()=>null);
+    const data = (snap && snap.exists) ? (snap.data()||{}) : {};
+    if (!data._v) data._v = 6;
+    congCache = data; congLoaded = true;
+    attachListener();
+    const p = (data._people||{})[s.me];
+    if (p) { render(); return; }
+    detachListener();
     clearSession();
+    state.cong = null; state.me = null;
   }
   renderLogin("");
 })();
