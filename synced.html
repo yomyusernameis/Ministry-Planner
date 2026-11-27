@@ -148,6 +148,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js"></script>
 <script>
 /* Ministry Planner — synced version (Firebase/Firestore backend).
    Brand restored to "Ministry Planner" Nov 26, 2026 (MP is only the acronym).
@@ -263,6 +264,11 @@ try {
   db = firebase.firestore();
   auth = firebase.auth();
 } catch(e){ console.error("Firebase init failed", e); }
+// Push notifications (Blaze): VAPID public key from Firebase Cloud Messaging.
+// Like the apiKey above, the public key is not a secret.
+const VAPID_KEY = "BGtl1oy2EL_SuJC9w7C3o474E4M0YKptiRBLlG0rLksPQNEJvSGewjNI23U_UVO6IwcQry7qx7dza2hPfS1v42E";
+let messaging = null;
+try { if (typeof firebase !== "undefined" && firebase.messaging) messaging = firebase.messaging(); } catch(e){}
 let congCache = {};       // latest congregation document data ({} while loading)
 let congLoaded = false;   // true once the first snapshot has arrived
 let congUnsub = null;     // onSnapshot unsubscribe for the current congregation
@@ -504,6 +510,80 @@ function installApp(){
   }
   state.installHelp = true; render();
 }
+// ---- Push notifications ----
+// Prefs live in the congregation doc, per person (_notif), so the server
+// sender reads the same settings the app shows. Tokens live in _tokens.
+// The local demo never registers: nothing sends to it.
+function notifPrefs(){
+  const d = load();
+  const p = (d._notif || {})[state.me] || {};
+  return {on:p.on!==false, remind:p.remind||"daybefore", chat:p.chat||"mentions", signups:p.signups!==false, conductor:p.conductor!==false};
+}
+function saveNotifPrefs(patch){
+  const d = load();
+  d._notif = d._notif || {};
+  d._notif[state.me] = Object.assign(notifPrefs(), patch);
+  save(d); render();
+}
+function notifCardHTML(){
+  if (state.localDemo) return "";
+  const p = notifPrefs();
+  const perm = (typeof Notification !== "undefined") ? Notification.permission : "unsupported";
+  const opt = (name, val, label) => `<option value="${val}" ${p[name]===val?"selected":""}>${label}</option>`;
+  return `
+  <div class="card">
+    <div class="secthead">Notifications</div>
+    ${perm === "denied" ? `<p class="sub">Notifications are blocked for this site — allow them in your browser settings to turn them on.</p>` : ``}
+    ${perm !== "granted" ? `<p class="sub">Turn on to get reminded before your days and pinged about day chats.</p><button onclick="enableNotifications()">Turn on notifications</button>` : `
+    <label style="display:flex;align-items:center;gap:10px;font-weight:500;color:var(--ink)">
+      <input type="checkbox" ${p.on?"checked":""} onchange="saveNotifPrefs({on:this.checked})" style="width:auto;margin:0">
+      Notifications on
+    </label>
+    <div style="${p.on?"":"opacity:.45;pointer-events:none"}">
+    <label>Remind me before my day</label>
+    <select onchange="saveNotifPrefs({remind:this.value})">
+      ${opt("remind","off","Off")}${opt("remind","morning","Morning of")}${opt("remind","daybefore","Day before")}
+    </select>
+    <label>Day chat</label>
+    <select onchange="saveNotifPrefs({chat:this.value})">
+      ${opt("chat","all","All messages")}${opt("chat","mentions","Only @mentions of me")}${opt("chat","off","Off")}
+    </select>
+    <label style="display:flex;align-items:center;gap:10px;font-weight:500;color:var(--ink)">
+      <input type="checkbox" ${p.signups?"checked":""} onchange="saveNotifPrefs({signups:this.checked})" style="width:auto;margin:0">
+      Someone signs up for a day I'm conducting
+    </label>
+    <label style="display:flex;align-items:center;gap:10px;font-weight:500;color:var(--ink)">
+      <input type="checkbox" ${p.conductor?"checked":""} onchange="saveNotifPrefs({conductor:this.checked})" style="width:auto;margin:0">
+      My conductor assignment changes
+    </label>
+    </div>`}
+    ${state.notifErr ? `<div class="err">${esc(state.notifErr)}</div>` : ``}
+  </div>`;
+}
+async function enableNotifications(){
+  if (state.localDemo) return;
+  if (!messaging || typeof Notification === "undefined" || !("serviceWorker" in navigator)) { state.notifErr = "Notifications aren't available in this browser."; render(); return; }
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { state.notifErr = "Notifications are off — allow them in your browser settings to turn them on."; render(); return; }
+    await registerPushToken();
+    state.notifErr = "";
+    render();
+  } catch(e){ console.error("enable notifications failed", e); state.notifErr = "Couldn't turn notifications on — try again."; render(); }
+}
+async function registerPushToken(){
+  if (state.localDemo || !messaging || !state.me) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const token = await messaging.getToken({vapidKey: VAPID_KEY, serviceWorkerRegistration: reg});
+    if (!token) return;
+    const d = load();
+    d._tokens = d._tokens || {};
+    const list = d._tokens[state.me] || [];
+    if (!list.includes(token)) { list.push(token); d._tokens[state.me] = list; save(d); }
+  } catch(e){ console.error("push token failed", e); }
+}
 function getSession(){
   try { return JSON.parse(localStorage.getItem("rollcall:session")) || null; } catch(e){ return null; }
 }
@@ -579,6 +659,7 @@ async function doSetup(){
 }
 function afterLogin(){
   setSession();
+  registerPushToken();
   const d = load();
   if (!(d._welcomed && d._welcomed[state.me])){
     state.firstShowCodes = false; state.firstPhoto = null;
@@ -1214,6 +1295,7 @@ function settingsHTML(){
     <p class="sub">Code: <b>${state.cong}</b> — hand it out in person, with each person's publisher code.</p>
     ${canManage() ? `<button class="ghost" onclick="rotateCode()">Rotate congregation code</button><div id="rotated"></div>` : ``}
   </div>
+  ${notifCardHTML()}
   ${canManage() ? `
   <div class="card">
     <div class="secthead">Weather</div>
@@ -1290,7 +1372,7 @@ function removePublisher(code, btn){
   const nm = personName(code);
   const fv = (typeof firebase!=="undefined" && firebase.firestore) ? firebase.firestore.FieldValue : null;
   const updates = {};
-  ["_people","_roles","_territory","_welcomed"].forEach(f=>{ if (d[f] && d[f][code]!==undefined && fv) updates[f+"."+code]=fv.delete(); });
+  ["_people","_roles","_territory","_welcomed","_notif","_tokens"].forEach(f=>{ if (d[f] && d[f][code]!==undefined && fv) updates[f+"."+code]=fv.delete(); });
   Object.keys(d).forEach(k=>{
     if (/^\d{4}-\d{2}-\d{2}$/.test(k) && d[k] && d[k][code]) { delete d[k][code]; updates[k]=d[k]; }
     if (k.endsWith("_conductor") && d[k]===nm) { delete d[k]; if (fv) updates[k]=fv.delete(); }
@@ -1299,6 +1381,8 @@ function removePublisher(code, btn){
   if (d._roles) delete d._roles[code];
   if (d._territory) delete d._territory[code];
   if (d._welcomed) delete d._welcomed[code];
+  if (d._notif) delete d._notif[code];
+  if (d._tokens) delete d._tokens[code];
   if (!state.localDemo && db && Object.keys(updates).length) congRef().update(updates).catch(e=>{ console.error("remove publisher failed", e); });
   render();
 }
@@ -1410,7 +1494,7 @@ function render(){
       attachListener();
     }
     const p = (data._people||{})[s.me];
-    if (p) { render(); return; }
+    if (p) { registerPushToken(); render(); return; }
     detachListener();
     clearSession();
     state.cong = null; state.me = null; state.localDemo = false;
