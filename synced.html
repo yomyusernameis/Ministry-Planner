@@ -385,7 +385,7 @@ function renderLogin(msg){
     <button class="optbtn" onclick="renderSetup()">${ic("cal",26)}<span><b>Set up a congregation</b><i>For the elder setting it up — you'll get the codes to hand out</i></span></button>
     ${msg?`<div class="err">${msg}</div>`:""}
     <button class="ghost" onclick="demoLogin()">Try the demo</button>
-    <div class="infobox">Demo — <b>Dickinson Congregation</b> (code <b>DEMO</b>). Tap "Try the demo" to make your own account — you'll get your own publisher code and set up your profile. Then mark yourself in for a day and look around.</div>
+    <div class="infobox">Demo — <b>Dickinson Congregation</b> (code <b>DEMO</b>). Tap "Try the demo" to make your own account and set up your profile. Then mark yourself in for a day and look around.</div>
   </div>`;
 }
 function renderJoin(msg){
@@ -1101,9 +1101,11 @@ function settingsHTML(){
         <option value="publisher" ${personRole(code)==="publisher"?"selected":""}>Publisher</option>
         <option value="conductor" ${personRole(code)==="conductor"?"selected":""}>Conductor</option>
         <option value="manager" ${personRole(code)==="manager"?"selected":""}>Manager</option>
-      </select>`).join("")}
+      </select>
+      ${code!==state.me ? `<button class="ghost small" style="margin:0 0 10px" onclick="removePublisher('${code}', this)">Remove</button>` : ``}` ).join("")}
     <button onclick="saveRoles()">Save roles</button>
-  </div>` : ``}
+  </div>
+  ${deleteCongCard()}` : ``}
   ${canEditConductors() ? `
   <div class="card">
     <div class="secthead">Territory</div>
@@ -1123,6 +1125,37 @@ function saveRoles(){
     else { data._roles[sel.dataset.role]=sel.value; }
   });
   save(data); render();
+}
+function deleteCongCard(){
+  if (state.cong==="DEMO") return `<div class="card"><div class="secthead">Delete congregation</div><p class="sub">The demo congregation can't be deleted.</p></div>`;
+  if (state.confirmDeleteCong) return `<div class="card"><div class="secthead">Delete congregation</div><p class="sub"><b>Are you sure?</b> This permanently deletes ${esc(congName())} — everyone, every sign-up and every chat — for everyone. This can't be undone.</p><div style="display:flex;gap:8px"><button style="flex:1;background:#b3261e" onclick="deleteCongregation()">Yes, delete it</button><button class="ghost" style="flex:1" onclick="state.confirmDeleteCong=false;state.deleteCongErr='';render();">Cancel</button></div>${state.deleteCongErr?`<div class="err">${esc(state.deleteCongErr)}</div>`:``}</div>`;
+  return `<div class="card"><div class="secthead">Delete congregation</div><p class="sub">This permanently deletes the whole congregation — everyone, every sign-up and every chat — for everyone. This can't be undone.</p><button style="background:#b3261e" onclick="state.confirmDeleteCong=true;render();">Delete this congregation</button></div>`;
+}
+function removePublisher(code, btn){
+  if (!canManage() || code===state.me) return;
+  if (!btn.dataset.armed){ btn.dataset.armed="1"; btn.textContent="Tap again to confirm"; setTimeout(()=>{ if (btn.isConnected){ delete btn.dataset.armed; btn.textContent="Remove"; } }, 5000); return; }
+  const d = load();
+  const nm = personName(code);
+  const fv = (typeof firebase!=="undefined" && firebase.firestore) ? firebase.firestore.FieldValue : null;
+  const updates = {};
+  ["_people","_roles","_territory","_welcomed"].forEach(f=>{ if (d[f] && d[f][code]!==undefined && fv) updates[f+"."+code]=fv.delete(); });
+  Object.keys(d).forEach(k=>{
+    if (/^\d{4}-\d{2}-\d{2}$/.test(k) && d[k] && d[k][code]) { delete d[k][code]; updates[k]=d[k]; }
+    if (k.endsWith("_conductor") && d[k]===nm) { delete d[k]; if (fv) updates[k]=fv.delete(); }
+  });
+  if (d._people) delete d._people[code];
+  if (d._roles) delete d._roles[code];
+  if (d._territory) delete d._territory[code];
+  if (d._welcomed) delete d._welcomed[code];
+  if (db && Object.keys(updates).length) congRef().update(updates).catch(e=>{ console.error("remove publisher failed", e); });
+  render();
+}
+async function deleteCongregation(){
+  if (!canManage() || state.cong==="DEMO" || !db) return;
+  detachListener();
+  try { await congRef().delete(); }
+  catch(e){ console.error("delete congregation failed", e); state.deleteCongErr="Couldn't delete it — check your connection and try again."; state.confirmDeleteCong=false; attachListener(); render(); return; }
+  logout();
 }
 function genPubCode(){ document.getElementById("np-code").value = genCode(9); }
 function addPublisher(){
