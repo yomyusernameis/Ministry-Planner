@@ -269,6 +269,20 @@ try {
 const VAPID_KEY = "BGtl1oy2EL_SuJC9w7C3o474E4M0YKptiRBLlG0rLksPQNEJvSGewjNI23U_UVO6IwcQry7qx7dza2hPfS1v42E";
 let messaging = null;
 try { if (typeof firebase !== "undefined" && firebase.messaging) messaging = firebase.messaging(); } catch(e){}
+// Foreground pushes: when the app is open, FCM delivers to the page (not the
+// service worker), so show the notification ourselves and refresh the view.
+// Without this, pushes that arrive while the app is open are silently dropped.
+if (messaging && messaging.onMessage) {
+  messaging.onMessage((payload) => {
+    const n = (payload && payload.notification) || {};
+    try {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        new Notification(n.title || "Ministry Planner", { body: n.body || "", icon: "icon-192.png" });
+      }
+    } catch (e) { console.error("foreground notification failed", e); }
+    render();
+  });
+}
 let congCache = {};       // latest congregation document data ({} while loading)
 let congLoaded = false;   // true once the first snapshot has arrived
 let congUnsub = null;     // onSnapshot unsubscribe for the current congregation

@@ -1,9 +1,9 @@
 // Ministry Planner service worker.
-// v2: offline app shell (cache-first for same-origin files, so the app
-// opens even with no signal at the territory) + Firebase Cloud Messaging
-// background handling, so push notifications show while the app is closed.
+// v3: same as v2, plus a notificationclick handler (tapping the notification
+// opens/focuses the app) and a fresh cache name so phones stuck on an older
+// worker pick this one up immediately.
 // Cross-origin requests (Firestore, gstatic, weather APIs) are never cached.
-const CACHE = "mp-v1";
+const CACHE = "mp-v2";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 try {
   importScripts("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js", "https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js");
@@ -13,6 +13,13 @@ try {
     return self.registration.showNotification(n.title || "Ministry Planner", {body: n.body || "", icon: "icon-192.png", badge: "icon-192.png"});
   });
 } catch(e){ /* messaging unavailable — offline cache still works */ }
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  e.waitUntil(clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
+    for (const c of list) { if ("focus" in c) return c.focus(); }
+    if (clients.openWindow) return clients.openWindow("./");
+  }));
+});
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {}));
   self.skipWaiting();
